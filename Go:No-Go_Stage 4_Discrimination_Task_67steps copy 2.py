@@ -90,6 +90,60 @@ v.session_dur = 30 * minute
 v.go_probability = 0.5
 
 
+# ---------------- Balanced trial sequence ----------------
+v.block_size = 10
+v.max_consecutive = 3
+
+v.trial_sequence = []
+v.sequence_index = 0
+
+# Track the last trial type and its consecutive run length.
+# 1 = Go, 0 = No-Go
+v.last_trial_type = None
+v.last_trial_run = 0
+
+
+def generate_trial_block(go_probability, block_size,
+                         max_consecutive, previous_type,
+                         previous_run):
+    """
+    Generate a randomized block with an exact Go/No-Go ratio.
+    Reject sequences that exceed max_consecutive, including
+    runs that continue from the preceding block.
+    """
+    n_go = int(round(block_size * go_probability))
+    n_nogo = block_size - n_go
+
+    base_sequence = [1] * n_go + [0] * n_nogo
+
+    for attempt in range(10000):
+        candidate = base_sequence.copy()
+        random.shuffle(candidate)
+
+        run_type = previous_type
+        run_length = previous_run
+        valid = True
+
+        for trial_type in candidate:
+            if trial_type == run_type:
+                run_length += 1
+            else:
+                run_type = trial_type
+                run_length = 1
+
+            if run_length > max_consecutive:
+                valid = False
+                break
+
+        if valid:
+            return candidate
+
+    raise RuntimeError(
+        "Could not generate a valid trial block. "
+        "Check block_size, go_probability, and max_consecutive."
+    )
+
+
 # ---------------- Trial variables ----------------
 
 v.current_trial = 0
@@ -229,32 +283,50 @@ def buffer(event):
 
         print('Trial: {}'.format(v.current_trial))
 
-        # Randomly select Go or No-Go trial.
-        if random.random() < v.go_probability:
-
-            v.trial_type = 1
+        
+        # Generate a new balanced block when the previous block is used up.
+        if v.sequence_index >= len(v.trial_sequence):
+            v.trial_sequence = generate_trial_block(
+                v.go_probability,
+                v.block_size,
+                v.max_consecutive,
+                v.last_trial_type,
+                v.last_trial_run
+            )
+            v.sequence_index = 0
+        
+        # Select the next trial from the pre-generated sequence.
+        v.trial_type = v.trial_sequence[v.sequence_index]
+        v.sequence_index += 1
+        
+        # Update consecutive-run tracking.
+        if v.trial_type == v.last_trial_type:
+            v.last_trial_run += 1
+        else:
+            v.last_trial_type = v.trial_type
+            v.last_trial_run = 1
+        
+        if v.trial_type == 1:
             v.go_trials += 1
-
             print('Trial_type: GO')
-
-            # Go signal = poke 1 + poke 2
-            # poke 3 = response port
+        
+            # Go signal = poke 1 + poke 2 + response port 3
             hw.five_poke.poke_1.LED.on()
             hw.five_poke.poke_2.LED.on()
             hw.five_poke.poke_3.LED.on()
-
+        
         else:
-
-            v.trial_type = 0
             v.nogo_trials += 1
-
             print('Trial_type: NO_GO')
-
-            # No-Go signal = poke 4 + poke 5
-            # poke 3 = response port
+        
+            # No-Go signal = response port 3 + poke 4 + poke 5
             hw.five_poke.poke_3.LED.on()
             hw.five_poke.poke_4.LED.on()
             hw.five_poke.poke_5.LED.on()
+        
+        print('Block_position: {}'.format(v.sequence_index))
+        print('Consecutive_run: {}'.format(v.last_trial_run))
+
 
         print('Buffer_start')
 
